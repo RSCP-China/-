@@ -91,6 +91,10 @@ def init_session_state():
         st.session_state.selected_order = 'None'
     if 'current_tab' not in st.session_state:
         st.session_state.current_tab = 0
+    if 'schedule_df' not in st.session_state:
+        st.session_state.schedule_df = None
+    if 'resources_df' not in st.session_state:
+        st.session_state.resources_df = None
 
 def get_text(key):
     return TRANSLATIONS[st.session_state.language][key]
@@ -163,13 +167,13 @@ def get_optimization_weights():
     
     weights = {
         'makespan': st.sidebar.number_input(get_text('makespan'),
-                                            min_value=0.0, max_value=100.0, value=25.0, step=5.0),
+                                          min_value=0.0, max_value=100.0, value=25.0, step=5.0),
         'due_date': st.sidebar.number_input(get_text('due_date'),
-                                            min_value=0.0, max_value=100.0, value=25.0, step=5.0),
+                                          min_value=0.0, max_value=100.0, value=25.0, step=5.0),
         'utilization': st.sidebar.number_input(get_text('utilization'),
-                                               min_value=0.0, max_value=100.0, value=25.0, step=5.0),
+                                             min_value=0.0, max_value=100.0, value=25.0, step=5.0),
         'setup_time': st.sidebar.number_input(get_text('setup_time'),
-                                              min_value=0.0, max_value=100.0, value=25.0, step=5.0)
+                                            min_value=0.0, max_value=100.0, value=25.0, step=5.0)
     }
     
     total = sum(weights.values())
@@ -369,29 +373,93 @@ def get_highlight_colorscale():
         [1, 'rgb(255,0,0)']            # Red for highlighted
     ]
 
-def show_heatmap_tab(schedule_df, resources_df):
-    """Display the heat map visualization tab"""
-    st.subheader(get_text('heatmap_title'))
+def show_order_timeline(schedule_df):
+    """Display a timeline view for a selected order"""
+    st.subheader("Order Timeline View")
     
-    # Order selection dropdown with session state
+    # Order selection
     orders = sorted(schedule_df['Job Number'].unique())
     selected_order = st.selectbox(
         get_text('select_order'),
-        ['None'] + list(orders),
-        key='selected_order'  # Use session state key
+        ['None'] + list(orders)
     )
     
-    # Create heat maps
-    load_data, highlight_data, text_data, dates, centers = create_interactive_heatmap(
+    if selected_order != 'None':
+        # Convert datetime columns if they're strings
+        if isinstance(schedule_df['Start Date'].iloc[0], str):
+            schedule_df['Start Date'] = pd.to_datetime(schedule_df['Start Date'])
+            schedule_df['End Date'] = pd.to_datetime(schedule_df['End Date'])
+            schedule_df['Due Date'] = pd.to_datetime(schedule_df['Due Date'])
+        
+        # Get the selected order data
+        order_data = schedule_df[schedule_df['Job Number'] == selected_order].copy()
+        order_data['Duration'] = (order_data['End Date'] - order_data['Start Date']).dt.total_seconds() / 3600
+        
+        # Show order details
+        st.markdown(f"""
+        **Order Details:**
+        - Job Number: {selected_order}
+        - Part Number: {order_data['Part Number'].iloc[0]}
+        - Due Date: {order_data['Due Date'].iloc[0].strftime('%Y-%m-%d')}
+        - Total Hours: {order_data['Total Hours'].sum():.1f}
+        """)
+        
+        # Create timeline visualization
+        fig = go.Figure()
+        
+        # Add bars for each work step
+        for idx, row in order_data.iterrows():
+            fig.add_trace(go.Bar(
+                x=[row['Duration']],
+                y=[f"{row['WorkCenter']} - {row['Place']}"],
+                orientation='h',
+                name=f"Machine {row['Machine ID']}",
+                text=[f"Duration: {row['Duration']:.1f}h<br>Setup: {row['Setup Time']}h<br>Run: {row['Run Time']}h<br>"
+                      f"Start: {row['Start Date'].strftime('%Y-%m-%d %H:%M')}<br>"
+                      f"End: {row['End Date'].strftime('%Y-%m-%d %H:%M')}"],
+                hoverinfo='text',
+                marker=dict(color='rgb(55, 83, 109)')
+            ))
+        
+        # Update layout
+        fig.update_layout(
+            title=f"Timeline for Order {selected_order}",
+            xaxis_title="Duration (hours)",
+            yaxis_title="Work Centers",
+            showlegend=True,
+            height=400,
+            barmode='stack'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Show detailed schedule
+        st.subheader("Detailed Schedule")
+        display_df = order_data[[
+            'WorkCenter', 'Place', 'Machine ID',
+            'Start Date', 'End Date', 'Setup Time', 'Run Time', 'Total Hours'
+        ]].sort_values('Start Date').copy()
+        
+        # Format datetime columns for display
+        display_df['Start Date'] = display_df['Start Date'].dt.strftime('%Y-%m-%d %H:%M')
+        display_df['End Date'] = display_df['End Date'].dt.strftime('%Y-%m-%d %H:%M')
+        st.dataframe(display_df)
+    else:
+        st.info("Select an order to view its timeline.")
+
+
+def show_heatmap_tab(schedule_df, resources_df):
+    """Display the base heat map without order highlighting"""
+    st.subheader(get_text('heatmap_title'))
+    
+    load_data, _, text_data, dates, centers = create_interactive_heatmap(
         schedule_df,
         resources_df,
-        selected_order if selected_order != 'None' else None
+        None  # No order highlighting in base heat map
     )
     
-    # Create figure with two heat map layers
+    # Create figure with load heat map
     fig = go.Figure()
-    
-    # Base layer: Load heat map
     fig.add_trace(go.Heatmap(
         z=load_data,
         x=[d.strftime('%Y-%m-%d') for d in dates],
@@ -408,22 +476,8 @@ def show_heatmap_tab(schedule_df, resources_df):
                 get_text('high_load')
             ],
             tickvals=[25, 65, 90]
-        ),
-        visible=selected_order == 'None'
+        )
     ))
-    
-    # Overlay layer: Order highlighting
-    if selected_order != 'None':
-        fig.add_trace(go.Heatmap(
-            z=highlight_data,
-            x=[d.strftime('%Y-%m-%d') for d in dates],
-            y=centers,
-            text=text_data,
-            hoverongaps=False,
-            colorscale=get_highlight_colorscale(),
-            showscale=False,
-            visible=True
-        ))
     
     fig.update_layout(
         xaxis_title=get_text('time_span'),
@@ -432,6 +486,10 @@ def show_heatmap_tab(schedule_df, resources_df):
     )
     
     st.plotly_chart(fig, use_container_width=True)
+
+def show_order_highlight_tab(schedule_df):
+    """Display a timeline view for a selected order"""
+    show_order_timeline(schedule_df)
 
 def main():
     init_session_state()
@@ -462,27 +520,38 @@ def main():
             st.subheader(get_text('upload_resources'))
             st.dataframe(resources_df)
             
-            if st.button(get_text('generate_schedule')):
-                with st.spinner("..."):
-                    schedule_df = create_schedule(orders_df, resources_df, weights)
-                
-                if schedule_df is not None and not schedule_df.empty:
+            # Store data in session state for persistence
+            if 'schedule_df' not in st.session_state:
+                generate_button = st.button(get_text('generate_schedule'))
+                if generate_button:
+                    with st.spinner("..."):
+                        st.session_state.schedule_df = create_schedule(orders_df, resources_df, weights)
+                        st.session_state.resources_df = resources_df
+            else:
+                if st.button(get_text('generate_schedule')):
+                    with st.spinner("..."):
+                        st.session_state.schedule_df = create_schedule(orders_df, resources_df, weights)
+                        st.session_state.resources_df = resources_df
+
+            # Show results if we have a schedule
+            if 'schedule_df' in st.session_state and st.session_state.schedule_df is not None and not st.session_state.schedule_df.empty:
                     st.success(get_text('schedule_generated'))
                     
                     # Create tabs
                     tabs = st.tabs([
                         get_text('schedule_tab'),
                         get_text('visualization_tab'),
+                        'Order Highlighting',
                         get_text('analysis_tab')
                     ])
                     
                     # Schedule tab
                     with tabs[0]:
                         st.subheader(get_text('title'))
-                        st.dataframe(schedule_df)
+                        st.dataframe(st.session_state.schedule_df)
                         
                         # Download schedule
-                        csv = schedule_df.to_csv(index=False, encoding='gbk')
+                        csv = st.session_state.schedule_df.to_csv(index=False, encoding='gbk')
                         st.download_button(
                             get_text('download_schedule'),
                             csv,
@@ -491,14 +560,20 @@ def main():
                             key='download-csv'
                         )
                     
-                    # Visualization tab
+                    # Visualization tab (base heat map)
                     with tabs[1]:
-                        show_heatmap_tab(schedule_df, resources_df)
+                        show_heatmap_tab(st.session_state.schedule_df, st.session_state.resources_df)
+                    
+                    # Order Highlighting tab
+                    with tabs[2]:
+                        show_order_highlight_tab(st.session_state.schedule_df)
                         
                     # Analysis tab
-                    with tabs[2]:
+                    with tabs[3]:
                         # Check for late orders
-                        late_orders = schedule_df[schedule_df['End Date'] > schedule_df['Due Date']]
+                        late_orders = st.session_state.schedule_df[
+                            st.session_state.schedule_df['End Date'] > st.session_state.schedule_df['Due Date']
+                        ]
                         
                         col1, col2 = st.columns(2)
                         
@@ -513,7 +588,7 @@ def main():
                         
                         with col2:
                             st.write(get_text('work_center_util'))
-                            utilization = schedule_df.groupby(['WorkCenter', 'Place']).agg({
+                            utilization = st.session_state.schedule_df.groupby(['WorkCenter', 'Place']).agg({
                                 'Total Hours': 'sum',
                                 'Machine ID': 'nunique'
                             }).round(2)
