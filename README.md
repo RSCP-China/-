@@ -1,97 +1,102 @@
-# Production Scheduling Optimizer
+# Production Scheduler
 
-An advanced production scheduling tool that uses constraint programming to optimize manufacturing schedules based on multiple weighted objectives.
+An intelligent production scheduling application that optimizes manufacturing schedules based on multiple weighted objectives.
 
 ## Features
 
-- Multi-objective optimization with adjustable weights for:
-  - Minimizing total makespan
-  - Prioritizing due dates
-  - Maximizing resource utilization
-  - Minimizing setup times
+- Multi-objective optimization with adjustable weights
+- Standard work hours (8 AM to 5 PM) scheduling
 - Support for multiple work centers and locations
-- Handles parallel machine scheduling
-- Considers setup times and run times
-- Real-time schedule analysis and visualization
-- Export schedules to CSV
+- Real-time schedule analysis
+- Chinese language support
+- CSV import/export functionality
 
-## Installation
+## Local Setup
 
-1. Ensure you have Python 3.8 or newer installed
-2. Install the required packages:
+1. Install Python 3.8 or newer
+2. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
+3. Run the application:
+   ```bash
+   streamlit run app.py
+   ```
+
+## Deploy to Streamlit Cloud
+
+1. Create a GitHub Repository:
+   ```bash
+   git init
+   git add .
+   git commit -m "Initial commit"
+   git branch -M main
+   git remote add origin <your-github-repo-url>
+   git push -u origin main
+   ```
+
+2. Deploy on Streamlit Cloud:
+   - Visit [share.streamlit.io](https://share.streamlit.io)
+   - Sign in with your GitHub account
+   - Click "New app"
+   - Select your repository, branch (main), and file (app.py)
+   - Click "Deploy"
 
 ## Input File Formats
 
 ### Production Orders (CSV)
 Required columns:
-- Job Number: Order identifier
-- Part Number: Product identifier
-- Due Date: Format DD/MM/YYYY
-- Priority: Numerical priority (lower number = higher priority)
-- Quantity: Number of units
-- WorkCenter: Work center name
-- Run Time: Processing time in hours
-- Setup Time: Setup time in hours
-- Place: Location identifier
-- Customer: Customer identifier
+- Job Number
+- Part Number
+- Due Date (DD/MM/YYYY)
+- Priority
+- Quantity
+- WorkCenter
+- Run Time (hours)
+- Setup Time (hours)
+- Place
+- Customer
 
 ### Resources (CSV)
 Required columns:
-- WorkCenter: Work center name
-- Available Quantity: Number of parallel machines
-- Shift hours: Working hours per shift
-- Shift Pattern: Shift pattern identifier
-- Place: Location identifier
+- WorkCenter
+- Available Quantity
+- Shift hours
+- Shift Pattern
+- Place
 
-## Running the Application
+## Using the Application
 
-1. Navigate to the application directory:
-   ```bash
-   cd path/to/production_scheduling
-   ```
-
-2. Launch the Streamlit application:
-   ```bash
-   streamlit run app.py
-   ```
-
-3. Access the application in your web browser (typically http://localhost:8501)
-
-## Using the Optimizer
-
-1. Upload your Production Orders and Resources CSV files
+1. Upload Production Orders and Resources CSV files
 2. Adjust optimization weights in the sidebar:
-   - Allocate percentages to each optimization strategy
-   - Ensure weights sum to 100%
-3. Click "Generate Optimized Schedule" to run the optimization
+   - Minimize Total Makespan
+   - Prioritize Due Dates
+   - Maximize Resource Utilization
+   - Minimize Setup Times
+3. Click "Generate Schedule" to create the production schedule
 4. Review the schedule and analysis
 5. Download the optimized schedule as CSV
 
-## Schedule Analysis
+## Schedule Analysis Features
 
-The application provides:
-- Late order identification
+- Late order detection
 - Work center utilization statistics
-- Machine assignment details
-- Total processing times
 - Setup time analysis
-
-## Output Format
-
-The generated schedule includes:
-- Job and part information
-- Start and end dates/times
-- Assigned work center and machine
-- Processing duration
-- Setup and run times
-- Due date compliance status
+- Total makespan calculation
+- Machine assignment details
 
 ## Notes
 
-- The optimizer uses Google OR-Tools CP-SAT solver
-- Maximum solving time is set to 60 seconds
-- Schedules consider current date/time as the starting point
-- All times are converted to hours internally for optimization
+- All times are handled in 24-hour format
+- Jobs are automatically split across work days
+- Schedule respects standard work hours (8 AM to 5 PM)
+- Chinese character support using GBK encoding
+- Schedule can be downloaded in CSV format with proper encoding
+
+## Support
+
+For issues and feature requests, please create an issue in the GitHub repository.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.

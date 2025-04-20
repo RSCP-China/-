@@ -1,0 +1,15 @@
+[theme]
+primaryColor = "#0066cc"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f0f2f6"
+textColor = "#262730"
+
+[server]
+maxUploadSize = 200
+enableCORS = false
+
+[global]
+developmentMode = false
+
+[deprecation]
+showPyplotGlobalUse = false
