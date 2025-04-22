@@ -5,6 +5,8 @@ An intelligent production scheduling application that optimizes manufacturing sc
 ## Features
 
 - Multi-objective optimization with adjustable weights
+- Intelligent order batching for efficiency
+- Dynamic date range filtering for visualization
 - Standard work hours (8 AM to 5 PM) scheduling
 - Support for multiple work centers and locations
 - Real-time schedule analysis
@@ -68,13 +70,32 @@ Required columns:
 ## Using the Application
 
 1. Upload Production Orders and Resources CSV files
-2. Adjust optimization weights in the sidebar:
-   - Minimize Total Makespan
-   - Prioritize Due Dates
-   - Maximize Resource Utilization
-   - Minimize Setup Times
+
+2. Configure Optimization Settings in the sidebar:
+   - Adjust optimization weights:
+     * Minimize Total Makespan
+     * Prioritize Due Dates
+     * Maximize Resource Utilization
+     * Minimize Setup Times
+   - Set batching parameters:
+     * Specify time window (in days) for batching similar orders
+     * Orders with same part number within the window will be combined
+
 3. Click "Generate Schedule" to create the production schedule
-4. Review the schedule and analysis
+
+4. Review schedule and analysis across different tabs:
+   - Schedule Tab:
+     * View complete schedule with batched orders
+     * Expand batched orders (prefixed with "BATCH_") to see details
+     * See original orders, total quantities, and combined times
+   - Visualization Tab:
+     * Select date range to filter the heat map view
+     * Analyze work center loads for specific periods
+     * View summary statistics for the selected timeframe
+   - Analysis Tab:
+     * Check late orders and utilization statistics
+     * Review setup time analysis and makespan
+
 5. Download the optimized schedule as CSV
 
 ## Schedule Analysis Features
@@ -84,6 +105,24 @@ Required columns:
 - Setup time analysis
 - Total makespan calculation
 - Machine assignment details
+- Batch order tracking and analysis
+- Date-range filtered load analysis
+
+## Advanced Features
+
+### Order Batching
+- Automatically combines orders with the same part number
+- Configurable time window for batching flexibility
+- Maintains traceability with original order information
+- Optimizes setup times and machine utilization
+- Preserves highest priority and earliest due date
+
+### Heat Map Visualization
+- Interactive date range selection
+- Work center load visualization
+- Color-coded capacity utilization
+- Detailed order information on hover
+- Period-specific summary statistics
 
 ## Notes
 
@@ -92,6 +131,8 @@ Required columns:
 - Schedule respects standard work hours (8 AM to 5 PM)
 - Chinese character support using GBK encoding
 - Schedule can be downloaded in CSV format with proper encoding
+- Batched orders maintain full traceability to original orders
+- Heat map visualization can be filtered by date range
 
 ## Support
 
