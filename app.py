@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # Translation dictionary
@@ -8,6 +9,9 @@ TRANSLATIONS = {
     'en': {
         'title': 'Production Scheduler',
         'optimization_weights': 'Optimization Weights',
+        'date_range': 'Date Range',
+        'start_date': 'Start Date',
+        'end_date': 'End Date',
         'weights_info': 'Allocate weights to different optimization strategies. The sum must equal 100%',
         'makespan': 'Minimize Total Makespan (%)',
         'due_date': 'Prioritize Due Dates (%)',
@@ -29,11 +33,26 @@ TRANSLATIONS = {
         'total_makespan': 'Total Makespan',
         'total_lateness': 'Total Lateness',
         'total_setup': 'Total Setup Time',
-        'hours': 'hours'
+        'hours': 'hours',
+        'visualization_tab': 'Visualization',
+        'heatmap_title': 'Work Center Load Heat Map',
+        'select_order': 'Select Order to Highlight',
+        'load_level': 'Load Level',
+        'time_span': 'Time Span',
+        'work_centers': 'Work Centers',
+        'load_percentage': 'Load Percentage',
+        'high_load': 'High Load (>80%)',
+        'medium_load': 'Medium Load (50-80%)',
+        'low_load': 'Low Load (<50%)',
+        'schedule_tab': 'Schedule',
+        'analysis_tab': 'Analysis'
     },
     'zh': {
         'title': '生产排程系统',
         'optimization_weights': '优化权重',
+        'date_range': '日期范围',
+        'start_date': '开始日期',
+        'end_date': '结束日期',
         'weights_info': '分配不同优化策略的权重。总和必须等于100%',
         'makespan': '最小化总生产时间 (%)',
         'due_date': '交期优先 (%)',
@@ -55,13 +74,33 @@ TRANSLATIONS = {
         'total_makespan': '总生产时间',
         'total_lateness': '总延期时间',
         'total_setup': '总设置时间',
-        'hours': '小时'
+        'hours': '小时',
+        'visualization_tab': '可视化',
+        'heatmap_title': '工作中心负荷热图',
+        'select_order': '选择订单以突出显示',
+        'load_level': '负荷水平',
+        'time_span': '时间范围',
+        'work_centers': '工作中心',
+        'load_percentage': '负荷百分比',
+        'high_load': '高负荷 (>80%)',
+        'medium_load': '中等负荷 (50-80%)',
+        'low_load': '低负荷 (<50%)',
+        'schedule_tab': '排程',
+        'analysis_tab': '分析'
     }
 }
 
 def init_session_state():
     if 'language' not in st.session_state:
         st.session_state.language = None
+    if 'selected_order' not in st.session_state:
+        st.session_state.selected_order = 'None'
+    if 'current_tab' not in st.session_state:
+        st.session_state.current_tab = 0
+    if 'schedule_df' not in st.session_state:
+        st.session_state.schedule_df = None
+    if 'resources_df' not in st.session_state:
+        st.session_state.resources_df = None
 
 def get_text(key):
     return TRANSLATIONS[st.session_state.language][key]
@@ -134,13 +173,13 @@ def get_optimization_weights():
     
     weights = {
         'makespan': st.sidebar.number_input(get_text('makespan'),
-                                            min_value=0.0, max_value=100.0, value=25.0, step=5.0),
+                                          min_value=0.0, max_value=100.0, value=25.0, step=5.0),
         'due_date': st.sidebar.number_input(get_text('due_date'),
-                                            min_value=0.0, max_value=100.0, value=25.0, step=5.0),
+                                          min_value=0.0, max_value=100.0, value=25.0, step=5.0),
         'utilization': st.sidebar.number_input(get_text('utilization'),
-                                               min_value=0.0, max_value=100.0, value=25.0, step=5.0),
+                                             min_value=0.0, max_value=100.0, value=25.0, step=5.0),
         'setup_time': st.sidebar.number_input(get_text('setup_time'),
-                                              min_value=0.0, max_value=100.0, value=25.0, step=5.0)
+                                            min_value=0.0, max_value=100.0, value=25.0, step=5.0)
     }
     
     total = sum(weights.values())
@@ -280,6 +319,224 @@ def create_schedule(orders_df, resources_df, weights):
     
     return schedule_df
 
+def create_interactive_heatmap(schedule_df, resources_df, selected_order=None):
+    """Create an interactive heat map showing work center loads and highlighting selected orders"""
+    # Process dates and work centers
+    schedule_df['Start Date'] = pd.to_datetime(schedule_df['Start Date'])
+    schedule_df['End Date'] = pd.to_datetime(schedule_df['End Date'])
+    date_range = pd.date_range(
+        schedule_df['Start Date'].min(),
+        schedule_df['End Date'].max(),
+        freq='D'
+    )
+    work_centers = schedule_df['WorkCenter'].unique()
+    
+    # Initialize matrices
+    load_data = np.zeros((len(work_centers), len(date_range)))
+    order_highlight = np.zeros((len(work_centers), len(date_range)))
+    text_data = [[[] for _ in range(len(date_range))] for _ in range(len(work_centers))]
+    
+    # Calculate loads and prepare highlighting
+    for i, work_center in enumerate(work_centers):
+        wc_schedule = schedule_df[schedule_df['WorkCenter'] == work_center]
+        max_capacity = resources_df[
+            resources_df['WorkCenter'] == work_center
+        ]['Available Quantity'].iloc[0] * 24  # 24 hours per day
+        
+        for j, date in enumerate(date_range):
+            date_schedule = wc_schedule[
+                (wc_schedule['Start Date'].dt.date <= date.date()) &
+                (wc_schedule['End Date'].dt.date >= date.date())
+            ]
+            
+            # Calculate load
+            daily_load = date_schedule['Total Hours'].sum()
+            load_percentage = (daily_load / max_capacity) * 100
+            load_data[i, j] = load_percentage
+            
+            # Store orders for this cell
+            orders = date_schedule['Job Number'].tolist()
+            text_data[i][j] = orders
+            
+            # Highlight selected order
+            if selected_order and selected_order in orders:
+                order_highlight[i, j] = 1
+    
+    return load_data, order_highlight, text_data, date_range, work_centers
+
+def get_load_colorscale():
+    """Get color scale for load percentage"""
+    return [
+        [0, 'rgb(0,0,255)'],      # Blue for <50%
+        [0.5, 'rgb(0,255,0)'],    # Green for 50-80%
+        [0.8, 'rgb(255,0,0)']     # Red for >80%
+    ]
+
+def get_highlight_colorscale():
+    """Get color scale for order highlighting"""
+    return [
+        [0, 'rgba(128,128,128,0.3)'],  # Grey for non-highlighted
+        [1, 'rgb(255,0,0)']            # Red for highlighted
+    ]
+
+def show_order_timeline(schedule_df):
+    """Display a timeline view for a selected order"""
+    st.subheader("Order Timeline View")
+    
+    # Order selection
+    orders = sorted(schedule_df['Job Number'].unique())
+    selected_order = st.selectbox(
+        get_text('select_order'),
+        ['None'] + list(orders)
+    )
+    
+    if selected_order != 'None':
+        # Convert datetime columns if they're strings
+        if isinstance(schedule_df['Start Date'].iloc[0], str):
+            schedule_df['Start Date'] = pd.to_datetime(schedule_df['Start Date'])
+            schedule_df['End Date'] = pd.to_datetime(schedule_df['End Date'])
+            schedule_df['Due Date'] = pd.to_datetime(schedule_df['Due Date'])
+        
+        # Get the selected order data
+        order_data = schedule_df[schedule_df['Job Number'] == selected_order].copy()
+        order_data['Duration'] = (order_data['End Date'] - order_data['Start Date']).dt.total_seconds() / 3600
+        
+        # Show order details
+        st.markdown(f"""
+        **Order Details:**
+        - Job Number: {selected_order}
+        - Part Number: {order_data['Part Number'].iloc[0]}
+        - Due Date: {order_data['Due Date'].iloc[0].strftime('%Y-%m-%d')}
+        - Total Hours: {order_data['Total Hours'].sum():.1f}
+        """)
+        
+        # Create timeline visualization
+        fig = go.Figure()
+        
+        # Add bars for each work step
+        for idx, row in order_data.iterrows():
+            fig.add_trace(go.Bar(
+                x=[row['Duration']],
+                y=[f"{row['WorkCenter']} - {row['Place']}"],
+                orientation='h',
+                name=f"Machine {row['Machine ID']}",
+                text=[f"Duration: {row['Duration']:.1f}h<br>Setup: {row['Setup Time']}h<br>Run: {row['Run Time']}h<br>"
+                      f"Start: {row['Start Date'].strftime('%Y-%m-%d %H:%M')}<br>"
+                      f"End: {row['End Date'].strftime('%Y-%m-%d %H:%M')}"],
+                hoverinfo='text',
+                marker=dict(color='rgb(55, 83, 109)')
+            ))
+        
+        # Update layout
+        fig.update_layout(
+            title=f"Timeline for Order {selected_order}",
+            xaxis_title="Duration (hours)",
+            yaxis_title="Work Centers",
+            showlegend=True,
+            height=400,
+            barmode='stack'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Show detailed schedule
+        st.subheader("Detailed Schedule")
+        display_df = order_data[[
+            'WorkCenter', 'Place', 'Machine ID',
+            'Start Date', 'End Date', 'Setup Time', 'Run Time', 'Total Hours'
+        ]].sort_values('Start Date').copy()
+        
+        # Format datetime columns for display
+        display_df['Start Date'] = display_df['Start Date'].dt.strftime('%Y-%m-%d %H:%M')
+        display_df['End Date'] = display_df['End Date'].dt.strftime('%Y-%m-%d %H:%M')
+        st.dataframe(display_df)
+    else:
+        st.info("Select an order to view its timeline.")
+
+
+def show_heatmap_tab(schedule_df, resources_df):
+    """Display the base heat map without order highlighting"""
+    st.subheader(get_text('heatmap_title'))
+    
+    # Get overall date range
+    min_date = schedule_df['Start Date'].dt.date.min()
+    max_date = schedule_df['End Date'].dt.date.max()
+    
+    # Date range selector
+    st.write(get_text('date_range'))
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input(get_text('start_date'), min_date)
+    with col2:
+        end_date = st.date_input(get_text('end_date'), max_date)
+    
+    # Filter schedule based on selected date range
+    filtered_schedule = schedule_df[
+        (schedule_df['Start Date'].dt.date <= end_date) &
+        (schedule_df['End Date'].dt.date >= start_date)
+    ]
+    
+    # Create filtered heatmap data
+    load_data, _, text_data, dates, centers = create_interactive_heatmap(
+        filtered_schedule,
+        resources_df,
+        None  # No order highlighting in base heat map
+    )
+    
+    # Create figure with load heat map
+    fig = go.Figure()
+    if len(dates) > 0:  # Only add heatmap if we have data
+        fig.add_trace(go.Heatmap(
+            z=load_data,
+            x=[d.strftime('%Y-%m-%d') for d in dates],
+            y=centers,
+            text=text_data,
+            hoverongaps=False,
+            colorscale=get_load_colorscale(),
+            showscale=True,
+            colorbar=dict(
+                title=get_text('load_percentage'),
+                ticktext=[
+                    get_text('low_load'),
+                    get_text('medium_load'),
+                    get_text('high_load')
+                ],
+                tickvals=[25, 65, 90]
+            )
+        ))
+    
+    # Update layout with better spacing and controls
+    fig.update_layout(
+        xaxis_title=get_text('time_span'),
+        yaxis_title=get_text('work_centers'),
+        height=600,
+        margin=dict(t=30, b=50, l=100, r=50),
+        xaxis=dict(
+            tickangle=-45,
+            tickformat='%Y-%m-%d',
+            tickmode='auto',
+            nticks=20
+        )
+    )
+    
+    if filtered_schedule.empty:
+        st.warning("No data available for the selected date range.")
+    else:
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Show summary statistics
+        total_hours = filtered_schedule['Total Hours'].sum()
+        num_orders = filtered_schedule['Job Number'].nunique()
+        st.markdown(f"""
+        **Selected Period Summary:**
+        - Total Work Hours: {total_hours:.1f}
+        - Number of Orders: {num_orders}
+        """)
+
+def show_order_highlight_tab(schedule_df):
+    """Display a timeline view for a selected order"""
+    show_order_timeline(schedule_df)
+
 def main():
     init_session_state()
     if not language_selector():
@@ -309,51 +566,81 @@ def main():
             st.subheader(get_text('upload_resources'))
             st.dataframe(resources_df)
             
-            if st.button(get_text('generate_schedule')):
-                with st.spinner("..."):
-                    schedule_df = create_schedule(orders_df, resources_df, weights)
-                
-                if schedule_df is not None and not schedule_df.empty:
+            # Store data in session state for persistence
+            if 'schedule_df' not in st.session_state:
+                generate_button = st.button(get_text('generate_schedule'))
+                if generate_button:
+                    with st.spinner("..."):
+                        st.session_state.schedule_df = create_schedule(orders_df, resources_df, weights)
+                        st.session_state.resources_df = resources_df
+            else:
+                if st.button(get_text('generate_schedule')):
+                    with st.spinner("..."):
+                        st.session_state.schedule_df = create_schedule(orders_df, resources_df, weights)
+                        st.session_state.resources_df = resources_df
+
+            # Show results if we have a schedule
+            if 'schedule_df' in st.session_state and st.session_state.schedule_df is not None and not st.session_state.schedule_df.empty:
                     st.success(get_text('schedule_generated'))
-                    st.subheader(get_text('title'))
-                    st.dataframe(schedule_df)
                     
-                    # Analysis
-                    st.subheader(get_text('schedule_analysis'))
+                    # Create tabs
+                    tabs = st.tabs([
+                        get_text('schedule_tab'),
+                        get_text('visualization_tab'),
+                        'Order Highlighting',
+                        get_text('analysis_tab')
+                    ])
                     
-                    # Check for late orders
-                    late_orders = schedule_df[schedule_df['End Date'] > schedule_df['Due Date']]
+                    # Schedule tab
+                    with tabs[0]:
+                        st.subheader(get_text('title'))
+                        st.dataframe(st.session_state.schedule_df)
+                        
+                        # Download schedule
+                        csv = st.session_state.schedule_df.to_csv(index=False, encoding='gbk')
+                        st.download_button(
+                            get_text('download_schedule'),
+                            csv,
+                            "production_schedule.csv",
+                            "text/csv",
+                            key='download-csv'
+                        )
                     
-                    col1, col2 = st.columns(2)
+                    # Visualization tab (base heat map)
+                    with tabs[1]:
+                        show_heatmap_tab(st.session_state.schedule_df, st.session_state.resources_df)
                     
-                    with col1:
-                        st.write(get_text('late_orders'))
-                        if not late_orders.empty:
-                            st.warning(f"{get_text('num_late_orders')}: {len(late_orders)}")
-                            st.dataframe(late_orders[['Job Number', 'Part Number', 'End Date',
-                                                    'Due Date', 'Total Hours']])
-                        else:
-                            st.success(get_text('no_late_orders'))
-                    
-                    with col2:
-                        st.write(get_text('work_center_util'))
-                        utilization = schedule_df.groupby(['WorkCenter', 'Place']).agg({
-                            'Total Hours': 'sum',
-                            'Machine ID': 'nunique'
-                        }).round(2)
-                        utilization['Avg Hours per Machine'] = (utilization['Total Hours'] /
-                                                              utilization['Machine ID']).round(2)
-                        st.dataframe(utilization)
-                    
-                    # Download schedule
-                    csv = schedule_df.to_csv(index=False, encoding='gbk')
-                    st.download_button(
-                        get_text('download_schedule'),
-                        csv,
-                        "production_schedule.csv",
-                        "text/csv",
-                        key='download-csv'
-                    )
+                    # Order Highlighting tab
+                    with tabs[2]:
+                        show_order_highlight_tab(st.session_state.schedule_df)
+                        
+                    # Analysis tab
+                    with tabs[3]:
+                        # Check for late orders
+                        late_orders = st.session_state.schedule_df[
+                            st.session_state.schedule_df['End Date'] > st.session_state.schedule_df['Due Date']
+                        ]
+                        
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.write(get_text('late_orders'))
+                            if not late_orders.empty:
+                                st.warning(f"{get_text('num_late_orders')}: {len(late_orders)}")
+                                st.dataframe(late_orders[['Job Number', 'Part Number', 'End Date',
+                                                        'Due Date', 'Total Hours']])
+                            else:
+                                st.success(get_text('no_late_orders'))
+                        
+                        with col2:
+                            st.write(get_text('work_center_util'))
+                            utilization = st.session_state.schedule_df.groupby(['WorkCenter', 'Place']).agg({
+                                'Total Hours': 'sum',
+                                'Machine ID': 'nunique'
+                            }).round(2)
+                            utilization['Avg Hours per Machine'] = (utilization['Total Hours'] /
+                                                                  utilization['Machine ID']).round(2)
+                            st.dataframe(utilization)
 
 if __name__ == "__main__":
     main()
