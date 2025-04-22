@@ -9,6 +9,9 @@ TRANSLATIONS = {
     'en': {
         'title': 'Production Scheduler',
         'optimization_weights': 'Optimization Weights',
+        'date_range': 'Date Range',
+        'start_date': 'Start Date',
+        'end_date': 'End Date',
         'weights_info': 'Allocate weights to different optimization strategies. The sum must equal 100%',
         'makespan': 'Minimize Total Makespan (%)',
         'due_date': 'Prioritize Due Dates (%)',
@@ -47,6 +50,9 @@ TRANSLATIONS = {
     'zh': {
         'title': '生产排程系统',
         'optimization_weights': '优化权重',
+        'date_range': '日期范围',
+        'start_date': '开始日期',
+        'end_date': '结束日期',
         'weights_info': '分配不同优化策略的权重。总和必须等于100%',
         'makespan': '最小化总生产时间 (%)',
         'due_date': '交期优先 (%)',
@@ -452,40 +458,80 @@ def show_heatmap_tab(schedule_df, resources_df):
     """Display the base heat map without order highlighting"""
     st.subheader(get_text('heatmap_title'))
     
+    # Get overall date range
+    min_date = schedule_df['Start Date'].dt.date.min()
+    max_date = schedule_df['End Date'].dt.date.max()
+    
+    # Date range selector
+    st.write(get_text('date_range'))
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input(get_text('start_date'), min_date)
+    with col2:
+        end_date = st.date_input(get_text('end_date'), max_date)
+    
+    # Filter schedule based on selected date range
+    filtered_schedule = schedule_df[
+        (schedule_df['Start Date'].dt.date <= end_date) &
+        (schedule_df['End Date'].dt.date >= start_date)
+    ]
+    
+    # Create filtered heatmap data
     load_data, _, text_data, dates, centers = create_interactive_heatmap(
-        schedule_df,
+        filtered_schedule,
         resources_df,
         None  # No order highlighting in base heat map
     )
     
     # Create figure with load heat map
     fig = go.Figure()
-    fig.add_trace(go.Heatmap(
-        z=load_data,
-        x=[d.strftime('%Y-%m-%d') for d in dates],
-        y=centers,
-        text=text_data,
-        hoverongaps=False,
-        colorscale=get_load_colorscale(),
-        showscale=True,
-        colorbar=dict(
-            title=get_text('load_percentage'),
-            ticktext=[
-                get_text('low_load'),
-                get_text('medium_load'),
-                get_text('high_load')
-            ],
-            tickvals=[25, 65, 90]
-        )
-    ))
+    if len(dates) > 0:  # Only add heatmap if we have data
+        fig.add_trace(go.Heatmap(
+            z=load_data,
+            x=[d.strftime('%Y-%m-%d') for d in dates],
+            y=centers,
+            text=text_data,
+            hoverongaps=False,
+            colorscale=get_load_colorscale(),
+            showscale=True,
+            colorbar=dict(
+                title=get_text('load_percentage'),
+                ticktext=[
+                    get_text('low_load'),
+                    get_text('medium_load'),
+                    get_text('high_load')
+                ],
+                tickvals=[25, 65, 90]
+            )
+        ))
     
+    # Update layout with better spacing and controls
     fig.update_layout(
         xaxis_title=get_text('time_span'),
         yaxis_title=get_text('work_centers'),
-        height=600
+        height=600,
+        margin=dict(t=30, b=50, l=100, r=50),
+        xaxis=dict(
+            tickangle=-45,
+            tickformat='%Y-%m-%d',
+            tickmode='auto',
+            nticks=20
+        )
     )
     
-    st.plotly_chart(fig, use_container_width=True)
+    if filtered_schedule.empty:
+        st.warning("No data available for the selected date range.")
+    else:
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Show summary statistics
+        total_hours = filtered_schedule['Total Hours'].sum()
+        num_orders = filtered_schedule['Job Number'].nunique()
+        st.markdown(f"""
+        **Selected Period Summary:**
+        - Total Work Hours: {total_hours:.1f}
+        - Number of Orders: {num_orders}
+        """)
 
 def show_order_highlight_tab(schedule_df):
     """Display a timeline view for a selected order"""
