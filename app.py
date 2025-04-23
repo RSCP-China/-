@@ -9,6 +9,9 @@ TRANSLATIONS = {
     'en': {
         'title': 'Production Scheduler',
         'optimization_weights': 'Optimization Weights',
+        'batching_section': 'Batching Configuration',
+        'batch_window': 'Time Window (Days)',
+        'batch_window_help': 'Orders with same part number within this time window will be batched',
         'date_range': 'Date Range',
         'start_date': 'Start Date',
         'end_date': 'End Date',
@@ -41,15 +44,26 @@ TRANSLATIONS = {
         'time_span': 'Time Span',
         'work_centers': 'Work Centers',
         'load_percentage': 'Load Percentage',
-        'high_load': 'High Load (>80%)',
+        'zero_load': 'No Load (0%)',
+        'very_low_load': 'Very Low Load (0-20%)',
+        'low_load': 'Low Load (20-50%)',
         'medium_load': 'Medium Load (50-80%)',
-        'low_load': 'Low Load (<50%)',
+        'high_load': 'High Load (>80%)',
         'schedule_tab': 'Schedule',
-        'analysis_tab': 'Analysis'
+        'analysis_tab': 'Analysis',
+        'batch_note': 'Note: Batched orders are prefixed with BATCH_. Expand rows to see original orders.',
+        'batch_details': 'Batch Details',
+        'original_orders': 'Original Orders',
+        'total_quantity': 'Total Quantity',
+        'total_runtime': 'Total Run Time',
+        'invalid_dates': 'Found {} rows with invalid dates. These orders will be skipped.'
     },
     'zh': {
         'title': '生产排程系统',
         'optimization_weights': '优化权重',
+        'batching_section': '批量计划设置',
+        'batch_window': '时间范围 (天)',
+        'batch_window_help': '在此时间范围内相同零件号的订单将被合并',
         'date_range': '日期范围',
         'start_date': '开始日期',
         'end_date': '结束日期',
@@ -82,11 +96,19 @@ TRANSLATIONS = {
         'time_span': '时间范围',
         'work_centers': '工作中心',
         'load_percentage': '负荷百分比',
-        'high_load': '高负荷 (>80%)',
+        'zero_load': '无负荷 (0%)',
+        'very_low_load': '极低负荷 (0-20%)',
+        'low_load': '低负荷 (20-50%)',
         'medium_load': '中等负荷 (50-80%)',
-        'low_load': '低负荷 (<50%)',
+        'high_load': '高负荷 (>80%)',
         'schedule_tab': '排程',
-        'analysis_tab': '分析'
+        'analysis_tab': '分析',
+        'batch_note': '注意：批量订单以BATCH_为前缀。展开行可查看原始订单。',
+        'batch_details': '批量详情',
+        'original_orders': '原始订单',
+        'total_quantity': '总数量',
+        'total_runtime': '总运行时间',
+        'invalid_dates': '发现 {} 行数据的日期无效。这些订单将被跳过。'
     }
 }
 
@@ -136,8 +158,14 @@ def load_production_orders(file):
                 st.error(f"Error loading file with {encoding} encoding: {str(e)}")
                 continue
         
-        # Convert Due Date to datetime
-        df['Due Date'] = pd.to_datetime(df['Due Date'], format='%d/%m/%Y')
+        # Convert Due Date to datetime, handling invalid values
+        df['Due Date'] = pd.to_datetime(df['Due Date'].replace('#VALUE!', pd.NaT), format='%d/%m/%Y', errors='coerce')
+        
+        # Drop rows with invalid dates
+        invalid_dates = df[df['Due Date'].isna()]
+        if not invalid_dates.empty:
+            st.warning(get_text('invalid_dates').format(len(invalid_dates)))
+            df = df.dropna(subset=['Due Date'])
         # Convert Run Time and Setup Time to float if they're not already
         df['Run Time'] = pd.to_numeric(df['Run Time'])
         df['Setup Time'] = pd.to_numeric(df['Setup Time'])
@@ -189,7 +217,21 @@ def get_optimization_weights():
         st.sidebar.error(get_text('weights_error'))
         return None
     
-    return {k: v/100.0 for k, v in weights.items()}
+    # Add batching configuration
+    st.sidebar.markdown("---")
+    st.sidebar.header(get_text('batching_section'))
+    batch_window = st.sidebar.number_input(
+        get_text('batch_window'),
+        min_value=0,
+        max_value=30,
+        value=5,
+        help=get_text('batch_window_help')
+    )
+    
+    # Return both weights and batch window
+    result = {k: v/100.0 for k, v in weights.items()}
+    result['batch_window'] = batch_window
+    return result
 
 def get_next_work_day(dt, total_hours):
     """Calculate the end time considering work hours (8AM-5PM)"""
@@ -218,7 +260,54 @@ def get_next_work_day(dt, total_hours):
     
     return current_time
 
+def batch_orders(orders_df, batch_window):
+    """Batch orders with same Part Number within the time window"""
+    if batch_window <= 0:
+        return orders_df
+    
+    # Sort orders by Part Number and Due Date
+    orders_df = orders_df.sort_values(['Part Number', 'Due Date'])
+    batched_orders = []
+    
+    # Group by Part Number
+    for part_number, group in orders_df.groupby('Part Number'):
+        current_batch = None
+        batch_orders = []  # List to keep track of orders in current batch
+        
+        for _, order in group.iterrows():
+            if current_batch is None:
+                # Start new batch
+                current_batch = order.to_dict()
+                current_batch['Original Orders'] = [current_batch['Job Number']]
+            elif (pd.to_datetime(order['Due Date']) - pd.to_datetime(current_batch['Due Date'])).days <= batch_window:
+                # Add to current batch
+                current_batch['Quantity'] += order['Quantity']
+                current_batch['Run Time'] += order['Run Time']
+                current_batch['Setup Time'] = max(current_batch['Setup Time'], order['Setup Time'])
+                current_batch['Due Date'] = min(current_batch['Due Date'], order['Due Date'])
+                current_batch['Priority'] = min(current_batch['Priority'], order['Priority'])
+                current_batch['Original Orders'].append(order['Job Number'])
+            else:
+                # Close current batch and start new one
+                current_batch['Job Number'] = f"BATCH_{current_batch['Job Number']}"
+                current_batch['Original Orders'] = ','.join(current_batch['Original Orders'])
+                batched_orders.append(current_batch)
+                current_batch = order.to_dict()
+                current_batch['Original Orders'] = [current_batch['Job Number']]
+        
+        # Add last batch for this part number
+        if current_batch is not None:
+            current_batch['Job Number'] = f"BATCH_{current_batch['Job Number']}"
+            current_batch['Original Orders'] = ','.join(current_batch['Original Orders'])
+            batched_orders.append(current_batch)
+    
+    return pd.DataFrame(batched_orders)
+
 def create_schedule(orders_df, resources_df, weights):
+    # Get batch window from weights and apply batching
+    batch_window = weights.pop('batch_window')  # Remove from weights dict
+    orders_df = batch_orders(orders_df, batch_window)
+    
     # Sort orders by priority (lower number = higher priority) and due date
     orders_df = orders_df.sort_values(['Priority', 'Due Date'])
     
@@ -289,7 +378,7 @@ def create_schedule(orders_df, resources_df, weights):
             'Start Date': start_time.strftime('%Y-%m-%d %H:%M'),
             'End Date': end_time.strftime('%Y-%m-%d %H:%M'),
             'Machine ID': best_machine + 1,
-            'Due Date': order['Due Date'].strftime('%Y-%m-%d'),
+            'Due Date': order['Due Date'],
             'Total Hours': total_time,
             'Setup Time': order['Setup Time'],
             'Run Time': order['Run Time']
@@ -351,7 +440,7 @@ def create_interactive_heatmap(schedule_df, resources_df, selected_order=None):
             
             # Calculate load
             daily_load = date_schedule['Total Hours'].sum()
-            load_percentage = (daily_load / max_capacity) * 100
+            load_percentage = daily_load / max_capacity  # Keep as decimal between 0-1
             load_data[i, j] = load_percentage
             
             # Store orders for this cell
@@ -367,9 +456,12 @@ def create_interactive_heatmap(schedule_df, resources_df, selected_order=None):
 def get_load_colorscale():
     """Get color scale for load percentage"""
     return [
-        [0, 'rgb(0,0,255)'],      # Blue for <50%
-        [0.5, 'rgb(0,255,0)'],    # Green for 50-80%
-        [0.8, 'rgb(255,0,0)']     # Red for >80%
+        [0, 'rgb(255,255,255)'],     # White for 0%
+        [0.001, 'rgb(211,211,211)'], # Light grey for >0% to 20%
+        [0.2, 'rgb(0,0,255)'],       # Blue for 20-50%
+        [0.5, 'rgb(0,255,0)'],       # Green for 50-80%
+        [0.8, 'rgb(255,0,0)'],       # Red for >80%
+        [1.0, 'rgb(255,0,0)']        # Red for 100%
     ]
 
 def get_highlight_colorscale():
@@ -497,11 +589,14 @@ def show_heatmap_tab(schedule_df, resources_df):
             colorbar=dict(
                 title=get_text('load_percentage'),
                 ticktext=[
+                    get_text('zero_load'),
+                    get_text('very_low_load'),
                     get_text('low_load'),
                     get_text('medium_load'),
                     get_text('high_load')
                 ],
-                tickvals=[25, 65, 90]
+                tickvals=[0, 0.1, 0.35, 0.65, 0.9],
+                tickformat=',.0%'  # Format as percentage
             )
         ))
     
