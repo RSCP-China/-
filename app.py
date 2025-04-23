@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import plotly.express as px
 from datetime import datetime, timedelta
 
 # Translation dictionary
@@ -56,7 +57,11 @@ TRANSLATIONS = {
         'original_orders': 'Original Orders',
         'total_quantity': 'Total Quantity',
         'total_runtime': 'Total Run Time',
-        'invalid_dates': 'Found {} rows with invalid dates. These orders will be skipped.'
+        'invalid_dates': 'Found {} rows with invalid dates. These orders will be skipped.',
+        'resource_hours': 'Resource Hours Comparison',
+        'hours_mismatch': 'Warning: Hours mismatch for {} - {}: Original={:.2f}, Scheduled={:.2f}',
+        'gantt_title': 'Work Order Gantt Chart',
+        'gantt_tab': 'Gantt Chart'
     },
     'zh': {
         'title': '生产排程系统',
@@ -108,7 +113,11 @@ TRANSLATIONS = {
         'original_orders': '原始订单',
         'total_quantity': '总数量',
         'total_runtime': '总运行时间',
-        'invalid_dates': '发现 {} 行数据的日期无效。这些订单将被跳过。'
+        'invalid_dates': '发现 {} 行数据的日期无效。这些订单将被跳过。',
+        'resource_hours': '资源工时对比',
+        'hours_mismatch': '警告：{} - {} 的工时不匹配：原始={:.2f}，排程后={:.2f}',
+        'gantt_title': '工单甘特图',
+        'gantt_tab': '甘特图'
     }
 }
 
@@ -123,6 +132,8 @@ def init_session_state():
         st.session_state.schedule_df = None
     if 'resources_df' not in st.session_state:
         st.session_state.resources_df = None
+    if 'original_resource_hours' not in st.session_state:
+        st.session_state.original_resource_hours = None
 
 def get_text(key):
     return TRANSLATIONS[st.session_state.language][key]
@@ -233,33 +244,6 @@ def get_optimization_weights():
     result['batch_window'] = batch_window
     return result
 
-def get_next_work_day(dt, total_hours):
-    """Calculate the end time considering work hours (8AM-5PM)"""
-    current_time = dt
-    remaining_hours = total_hours
-    
-    while remaining_hours > 0:
-        # If current time is before 8AM, move to 8AM
-        if current_time.hour < 8:
-            current_time = current_time.replace(hour=8, minute=0, second=0, microsecond=0)
-        # If current time is after 5PM, move to 8AM next day
-        elif current_time.hour >= 17:
-            current_time = (current_time + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
-        
-        # Calculate hours until end of current work day
-        hours_until_end = 17 - current_time.hour
-        
-        if remaining_hours <= hours_until_end:
-            # Task can be completed today
-            current_time = current_time + timedelta(hours=remaining_hours)
-            remaining_hours = 0
-        else:
-            # Task continues to next day
-            remaining_hours -= hours_until_end
-            current_time = (current_time + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
-    
-    return current_time
-
 def batch_orders(orders_df, batch_window):
     """Batch orders with same Part Number within the time window"""
     if batch_window <= 0:
@@ -282,6 +266,7 @@ def batch_orders(orders_df, batch_window):
             elif (pd.to_datetime(order['Due Date']) - pd.to_datetime(current_batch['Due Date'])).days <= batch_window:
                 # Add to current batch
                 current_batch['Quantity'] += order['Quantity']
+                # Simply add the run times since they are already total times
                 current_batch['Run Time'] += order['Run Time']
                 current_batch['Setup Time'] = max(current_batch['Setup Time'], order['Setup Time'])
                 current_batch['Due Date'] = min(current_batch['Due Date'], order['Due Date'])
@@ -322,12 +307,12 @@ def create_schedule(orders_df, resources_df, weights):
     
     # Initialize machine availability times
     machine_times = {}
-    start_time = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)  # Start at 8 AM
+    schedule_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)  # Start at midnight
     
     # Initialize all machines with start time
     for (work_center, place), resource in resources_dict.items():
         for machine in range(resource['available_machines']):
-            machine_times[(work_center, place, machine)] = start_time
+            machine_times[(work_center, place, machine)] = schedule_start
     
     schedule = []
     
@@ -360,13 +345,11 @@ def create_schedule(orders_df, resources_df, weights):
             continue
         
         machine_key = (work_center, place, best_machine)
-        start_time = machine_times[machine_key]
+        job_start_time = machine_times[machine_key]
+        job_end_time = job_start_time + timedelta(hours=total_time)
         
-        # Calculate end time considering work hours
-        end_time = get_next_work_day(start_time, total_time)
-        
-        # Update machine availability time
-        machine_times[machine_key] = end_time
+        # Update machine availability time to exact moment this job finishes
+        machine_times[machine_key] = job_end_time
         
         schedule.append({
             'Job Number': order['Job Number'],
@@ -375,8 +358,8 @@ def create_schedule(orders_df, resources_df, weights):
             'Place': place,
             'Priority': order['Priority'],
             'Quantity': order['Quantity'],
-            'Start Date': start_time.strftime('%Y-%m-%d %H:%M'),
-            'End Date': end_time.strftime('%Y-%m-%d %H:%M'),
+            'Start Date': job_start_time.strftime('%Y-%m-%d %H:%M'),
+            'End Date': job_end_time.strftime('%Y-%m-%d %H:%M'),
             'Machine ID': best_machine + 1,
             'Due Date': order['Due Date'],
             'Total Hours': total_time,
@@ -470,6 +453,101 @@ def get_highlight_colorscale():
         [0, 'rgba(128,128,128,0.3)'],  # Grey for non-highlighted
         [1, 'rgb(255,0,0)']            # Red for highlighted
     ]
+
+def show_gantt_chart(schedule_df):
+    """Create a Gantt chart visualization showing work order flow through work centers"""
+    st.subheader(get_text('gantt_title'))
+    
+    if schedule_df is None or schedule_df.empty:
+        st.warning("No schedule data available")
+        return
+        
+    # Ensure datetime columns are datetime type
+    schedule_df['Start Date'] = pd.to_datetime(schedule_df['Start Date'])
+    schedule_df['End Date'] = pd.to_datetime(schedule_df['End Date'])
+    
+    # Create color map for unique job numbers
+    job_numbers = schedule_df['Job Number'].unique()
+    colors = px.colors.qualitative.Set3 * (1 + len(job_numbers) // len(px.colors.qualitative.Set3))
+    color_map = dict(zip(job_numbers, colors[:len(job_numbers)]))
+    
+    fig = go.Figure()
+    
+    # Group by job number to process each order's flow
+    for job_number in job_numbers:
+        job_steps = schedule_df[schedule_df['Job Number'] == job_number].sort_values('Start Date')
+        
+        # Add task bars
+        for idx, step in job_steps.iterrows():
+            fig.add_trace(go.Bar(
+                base=step['Start Date'].timestamp() / 3600,  # Convert to hours
+                x=[(step['End Date'] - step['Start Date']).total_seconds() / 3600],
+                y=[f"{step['WorkCenter']} - {step['Place']}"],
+                orientation='h',
+                name=job_number,
+                marker_color=color_map[job_number],
+                showlegend=bool(idx == job_steps.index[0]),  # Show in legend only once per job
+                customdata=np.array([[
+                    job_number,
+                    step['Part Number'],
+                    step['Machine ID'],
+                    step['Setup Time'],
+                    step['Run Time'],
+                    step['Total Hours'],
+                    step['Start Date'].strftime('%Y-%m-%d %H:%M'),
+                    step['End Date'].strftime('%Y-%m-%d %H:%M')
+                ]]),
+                hovertemplate=
+                "<b>Job: %{customdata[0]}</b><br>" +
+                "Part: %{customdata[1]}<br>" +
+                "Work Center: %{y}<br>" +
+                "Machine: %{customdata[2]}<br>" +
+                "Setup Time: %{customdata[3]:.1f}h<br>" +
+                "Run Time: %{customdata[4]:.1f}h<br>" +
+                "Total Time: %{customdata[5]:.1f}h<br>" +
+                "Start: %{customdata[6]}<br>" +
+                "End: %{customdata[7]}<br>" +
+                "<extra></extra>"
+            ))
+            
+            # Add connecting lines between steps
+            if idx < len(job_steps) - 1:
+                next_step = job_steps.iloc[idx + 1]
+                fig.add_trace(go.Scatter(
+                    x=[step['End Date'].timestamp() / 3600, next_step['Start Date'].timestamp() / 3600],
+                    y=[f"{step['WorkCenter']} - {step['Place']}",
+                       f"{next_step['WorkCenter']} - {next_step['Place']}"],
+                    mode='lines',
+                    line=dict(color=color_map[job_number], dash='dot'),
+                    showlegend=False,
+                    hoverinfo='skip'
+                ))
+    
+    # Get time range for x-axis
+    min_time = schedule_df['Start Date'].min().timestamp() / 3600
+    max_time = schedule_df['End Date'].max().timestamp() / 3600
+    
+    # Update layout
+    fig.update_layout(
+        barmode='overlay',
+        height=max(600, len(schedule_df['WorkCenter'].unique()) * 60),
+        yaxis=dict(
+            title="Work Centers",
+            categoryorder='array',
+            categoryarray=sorted(schedule_df['WorkCenter'].unique())
+        ),
+        xaxis=dict(
+            title="Hours from Start",
+            tickmode='array',
+            tickvals=[i for i in range(0, int(max_time - min_time) + 24, 24)],
+            ticktext=[f"Day {i//24 + 1}" for i in range(0, int(max_time - min_time) + 24, 24)]
+        ),
+        showlegend=True,
+        legend_title="Work Orders",
+        margin=dict(l=200, r=100)
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
 
 def show_order_timeline(schedule_df):
     """Display a timeline view for a selected order"""
@@ -632,6 +710,15 @@ def show_order_highlight_tab(schedule_df):
     """Display a timeline view for a selected order"""
     show_order_timeline(schedule_df)
 
+def calculate_resource_hours(orders_df):
+    """Calculate total hours by resource (WorkCenter, Place)"""
+    resource_hours = orders_df.groupby(['WorkCenter', 'Place']).agg({
+        'Run Time': 'sum',
+        'Setup Time': 'sum'
+    }).round(2)
+    resource_hours['Total Hours'] = resource_hours['Run Time'] + resource_hours['Setup Time']
+    return resource_hours
+
 def main():
     init_session_state()
     if not language_selector():
@@ -655,14 +742,21 @@ def main():
         resources_df = load_resources(resources_file)
         
         if orders_df is not None and resources_df is not None:
+            # Display orders with total hours
             st.subheader(get_text('upload_orders'))
+            total_run_hours = orders_df['Run Time'].sum()
+            total_setup_hours = orders_df['Setup Time'].sum()
             st.dataframe(orders_df)
+            st.info(f"Total Run Hours: {total_run_hours:.2f}, Total Setup Hours: {total_setup_hours:.2f}")
             
             st.subheader(get_text('upload_resources'))
             st.dataframe(resources_df)
             
             # Store data in session state for persistence
             if 'schedule_df' not in st.session_state:
+                # Store original hours for comparison
+                st.session_state.original_run_hours = total_run_hours
+                st.session_state.original_resource_hours = calculate_resource_hours(orders_df)
                 generate_button = st.button(get_text('generate_schedule'))
                 if generate_button:
                     with st.spinner("..."):
@@ -683,13 +777,23 @@ def main():
                         get_text('schedule_tab'),
                         get_text('visualization_tab'),
                         'Order Highlighting',
+                        get_text('gantt_tab'),
                         get_text('analysis_tab')
                     ])
                     
                     # Schedule tab
                     with tabs[0]:
                         st.subheader(get_text('title'))
+                        
+                        # Calculate and display totals
+                        scheduled_run_hours = st.session_state.schedule_df['Run Time'].sum()
+                        scheduled_setup_hours = st.session_state.schedule_df['Setup Time'].sum()
                         st.dataframe(st.session_state.schedule_df)
+                        st.info(f"Total Run Hours: {scheduled_run_hours:.2f}, Total Setup Hours: {scheduled_setup_hours:.2f}")
+                        
+                        if 'original_run_hours' in st.session_state:
+                            if abs(scheduled_run_hours - st.session_state.original_run_hours) > 0.01:
+                                st.warning(f"Warning: Total run hours changed from {st.session_state.original_run_hours:.2f} to {scheduled_run_hours:.2f}")
                         
                         # Download schedule
                         csv = st.session_state.schedule_df.to_csv(index=False, encoding='gbk')
@@ -704,13 +808,16 @@ def main():
                     # Visualization tab (base heat map)
                     with tabs[1]:
                         show_heatmap_tab(st.session_state.schedule_df, st.session_state.resources_df)
-                    
                     # Order Highlighting tab
                     with tabs[2]:
                         show_order_highlight_tab(st.session_state.schedule_df)
+                    
+                    # Gantt Chart tab
+                    with tabs[3]:
+                        show_gantt_chart(st.session_state.schedule_df)
                         
                     # Analysis tab
-                    with tabs[3]:
+                    with tabs[4]:
                         # Check for late orders
                         late_orders = st.session_state.schedule_df[
                             st.session_state.schedule_df['End Date'] > st.session_state.schedule_df['Due Date']
@@ -728,14 +835,33 @@ def main():
                                 st.success(get_text('no_late_orders'))
                         
                         with col2:
-                            st.write(get_text('work_center_util'))
-                            utilization = st.session_state.schedule_df.groupby(['WorkCenter', 'Place']).agg({
-                                'Total Hours': 'sum',
-                                'Machine ID': 'nunique'
-                            }).round(2)
-                            utilization['Avg Hours per Machine'] = (utilization['Total Hours'] /
-                                                                  utilization['Machine ID']).round(2)
-                            st.dataframe(utilization)
+                            st.write(get_text('resource_hours'))
+                            if 'original_resource_hours' in st.session_state and st.session_state.original_resource_hours is not None:
+                                scheduled_hours = calculate_resource_hours(st.session_state.schedule_df)
+                                original_hours = st.session_state.original_resource_hours
+                                
+                                # Compare hours
+                                comparison = pd.merge(
+                                    original_hours,
+                                    scheduled_hours,
+                                    suffixes=(' (Original)', ' (Scheduled)'),
+                                    left_index=True,
+                                    right_index=True,
+                                    how='outer'
+                                ).fillna(0)
+                                
+                                st.dataframe(comparison)
+                                
+                                # Check for significant differences
+                                for idx in comparison.index:
+                                    orig_total = comparison.loc[idx, 'Total Hours (Original)']
+                                    sched_total = comparison.loc[idx, 'Total Hours (Scheduled)']
+                                    if abs(orig_total - sched_total) > 0.01:
+                                        st.warning(get_text('hours_mismatch').format(
+                                            idx[0], idx[1], orig_total, sched_total
+                                        ))
+                            else:
+                                st.info("Resource hours comparison not available. Please regenerate the schedule.")
 
 if __name__ == "__main__":
     main()
