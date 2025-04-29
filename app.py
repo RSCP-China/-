@@ -3,7 +3,9 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
 # Translation dictionary
 TRANSLATIONS = {
@@ -39,6 +41,10 @@ TRANSLATIONS = {
         'total_setup': 'Total Setup Time',
         'hours': 'hours',
         'visualization_tab': 'Visualization',
+        'output_folder': 'Output Folder Path',
+        'output_folder_placeholder': 'Enter folder path for saving schedule',
+        'auto_save_success': 'Schedule automatically saved to: {}',
+        'auto_save_error': 'Error saving schedule: {}',
         'heatmap_title': 'Work Center Load Heat Map',
         'select_order': 'Select Order to Highlight',
         'load_level': 'Load Level',
@@ -117,9 +123,45 @@ TRANSLATIONS = {
         'resource_hours': '资源工时对比',
         'hours_mismatch': '警告：{} - {} 的工时不匹配：原始={:.2f}，排程后={:.2f}',
         'gantt_title': '工单甘特图',
-        'gantt_tab': '甘特图'
+        'gantt_tab': '甘特图',
+        'output_folder': '输出文件夹路径',
+        'output_folder_placeholder': '输入排程结果保存文件夹路径',
+        'auto_save_success': '排程已自动保存至：{}',
+        'auto_save_error': '保存排程时出错：{}'
     }
 }
+
+def export_schedule_to_excel(schedule_df, output_folder):
+    """Export schedule to Excel with proper formatting"""
+    try:
+        # Create output folder if it doesn't exist
+        Path(output_folder).mkdir(parents=True, exist_ok=True)
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"production_schedule_{timestamp}.xlsx"
+        filepath = os.path.join(output_folder, filename)
+        
+        # Create Excel writer
+        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+            schedule_df.to_excel(writer, index=False, sheet_name='Schedule')
+            
+            # Get workbook and worksheet
+            workbook = writer.book
+            worksheet = writer.sheets['Schedule']
+            
+            # Set column widths
+            for i, col in enumerate(schedule_df.columns):
+                max_length = max(
+                    schedule_df[col].astype(str).apply(len).max(),
+                    len(str(col))
+                )
+                worksheet.column_dimensions[chr(65 + i)].width = min(max_length + 2, 30)
+                
+        return filepath
+        
+    except Exception as e:
+        raise Exception(f"Error saving Excel file: {str(e)}")
 
 def init_session_state():
     if 'language' not in st.session_state:
@@ -134,6 +176,10 @@ def init_session_state():
         st.session_state.resources_df = None
     if 'original_resource_hours' not in st.session_state:
         st.session_state.original_resource_hours = None
+    if 'output_folder' not in st.session_state:
+        st.session_state.output_folder = ""
+    if 'gantt_selected_order' not in st.session_state:
+        st.session_state.gantt_selected_order = 'None'
 
 def get_text(key):
     return TRANSLATIONS[st.session_state.language][key]
@@ -177,9 +223,24 @@ def load_production_orders(file):
         if not invalid_dates.empty:
             st.warning(get_text('invalid_dates').format(len(invalid_dates)))
             df = df.dropna(subset=['Due Date'])
+        # Check if required columns exist
+        required_columns = ['Job Number', 'Part Number', 'Due Date', 'operation sequence',
+                          'WorkCenter', 'Place', 'Run Time', 'Setup Time']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            raise ValueError(f"Missing required columns: {', '.join(missing_columns)}\n"
+                           f"Available columns are: {', '.join(df.columns)}")
+        
         # Convert Run Time and Setup Time to float if they're not already
         df['Run Time'] = pd.to_numeric(df['Run Time'])
         df['Setup Time'] = pd.to_numeric(df['Setup Time'])
+        
+        # Print column names and first row for debugging
+        print("Available columns:", df.columns.tolist())
+        if not df.empty:
+            print("\nExample row:")
+            print(df.iloc[0])
+        
         return df
     except Exception as e:
         st.error(f"Error loading file: {str(e)}")
@@ -249,8 +310,8 @@ def batch_orders(orders_df, batch_window):
     if batch_window <= 0:
         return orders_df
     
-    # Sort orders by Part Number and Due Date
-    orders_df = orders_df.sort_values(['Part Number', 'Due Date'])
+    # Sort orders by Part Number, Due Date, and operation sequence
+    orders_df = orders_df.sort_values(['Part Number', 'Due Date', 'operation sequence'])
     batched_orders = []
     
     # Group by Part Number
@@ -261,30 +322,61 @@ def batch_orders(orders_df, batch_window):
         for _, order in group.iterrows():
             if current_batch is None:
                 # Start new batch
-                current_batch = order.to_dict()
-                current_batch['Original Orders'] = [current_batch['Job Number']]
-            elif (pd.to_datetime(order['Due Date']) - pd.to_datetime(current_batch['Due Date'])).days <= batch_window:
-                # Add to current batch
-                current_batch['Quantity'] += order['Quantity']
-                # Simply add the run times since they are already total times
-                current_batch['Run Time'] += order['Run Time']
-                current_batch['Setup Time'] = max(current_batch['Setup Time'], order['Setup Time'])
-                current_batch['Due Date'] = min(current_batch['Due Date'], order['Due Date'])
-                current_batch['Priority'] = min(current_batch['Priority'], order['Priority'])
+                # Group by operation sequence when starting a new batch
+                current_batch = {
+                    'base': order.to_dict(),
+                    'operations': {order['operation sequence']: order.to_dict()},
+                    'Original Orders': [order['Job Number']]
+                }
+            elif (pd.to_datetime(order['Due Date']) - pd.to_datetime(current_batch['base']['Due Date'])).days <= batch_window:
+                # Add to current batch, maintaining operation sequences
                 current_batch['Original Orders'].append(order['Job Number'])
+                current_batch['base']['Quantity'] += order['Quantity']
+                current_batch['base']['JobPriority'] = min(current_batch['base']['JobPriority'], order['JobPriority'])
+                current_batch['base']['Due Date'] = min(current_batch['base']['Due Date'], order['Due Date'])
+                
+                # Update or add operation sequence
+                op_seq = order['operation sequence']
+                if op_seq in current_batch['operations']:
+                    # Update existing operation
+                    current_batch['operations'][op_seq]['Run Time'] += order['Run Time']
+                    current_batch['operations'][op_seq]['Setup Time'] = max(
+                        current_batch['operations'][op_seq]['Setup Time'],
+                        order['Setup Time']
+                    )
+                else:
+                    # Add new operation
+                    current_batch['operations'][op_seq] = order.to_dict()
             else:
-                # Close current batch and start new one
-                current_batch['Job Number'] = f"BATCH_{current_batch['Job Number']}"
-                current_batch['Original Orders'] = ','.join(current_batch['Original Orders'])
-                batched_orders.append(current_batch)
-                current_batch = order.to_dict()
-                current_batch['Original Orders'] = [current_batch['Job Number']]
+                # Close current batch and create entries for each operation
+                batch_job_number = f"BATCH_{current_batch['base']['Job Number']}"
+                original_orders = ','.join(current_batch['Original Orders'])
+                
+                # Add each operation as a separate entry
+                for op_seq, op_data in sorted(current_batch['operations'].items()):
+                    op_entry = op_data.copy()
+                    op_entry['Job Number'] = batch_job_number
+                    op_entry['Original Orders'] = original_orders
+                    batched_orders.append(op_entry)
+                    
+                # Start new batch
+                current_batch = {
+                    'base': order.to_dict(),
+                    'operations': {order['operation sequence']: order.to_dict()},
+                    'Original Orders': [order['Job Number']]
+                }
         
-        # Add last batch for this part number
+        # Add last batch for this part number with all its operations
         if current_batch is not None:
-            current_batch['Job Number'] = f"BATCH_{current_batch['Job Number']}"
-            current_batch['Original Orders'] = ','.join(current_batch['Original Orders'])
-            batched_orders.append(current_batch)
+            batch_job_number = f"BATCH_{current_batch['base']['Job Number']}"
+            original_orders = ','.join(current_batch['Original Orders'])
+            
+            # Add each operation as a separate entry
+            for op_seq, op_data in sorted(current_batch['operations'].items()):
+                op_entry = op_data.copy()
+                op_entry['Job Number'] = batch_job_number
+                op_entry['Original Orders'] = original_orders
+                batched_orders.append(op_entry)
     
     return pd.DataFrame(batched_orders)
 
@@ -293,8 +385,11 @@ def create_schedule(orders_df, resources_df, weights):
     batch_window = weights.pop('batch_window')  # Remove from weights dict
     orders_df = batch_orders(orders_df, batch_window)
     
-    # Sort orders by priority (lower number = higher priority) and due date
-    orders_df = orders_df.sort_values(['Priority', 'Due Date'])
+    # Sort orders by priority, job number, and operation sequence
+    orders_df = orders_df.sort_values(['JobPriority', 'Due Date', 'Job Number', 'operation sequence'])
+    
+    # Create a dictionary to track the last operation end time for each job
+    job_end_times = {}
     
     # Group resources by WorkCenter and Place
     resources_dict = {}
@@ -345,18 +440,24 @@ def create_schedule(orders_df, resources_df, weights):
             continue
         
         machine_key = (work_center, place, best_machine)
-        job_start_time = machine_times[machine_key]
+        # Get the earliest possible start time based on previous operation
+        job_start_time = max(
+            machine_times[machine_key],  # Machine availability
+            job_end_times.get(order['Job Number'], schedule_start)  # Previous operation end time
+        )
         job_end_time = job_start_time + timedelta(hours=total_time)
         
-        # Update machine availability time to exact moment this job finishes
+        # Update both machine availability and job end time tracking
         machine_times[machine_key] = job_end_time
+        job_end_times[order['Job Number']] = job_end_time  # Track when this job's operation finishes
         
         schedule.append({
             'Job Number': order['Job Number'],
             'Part Number': order['Part Number'],
+            'Operation': order['operation sequence'],
             'WorkCenter': work_center,
             'Place': place,
-            'Priority': order['Priority'],
+            'JobPriority': order['JobPriority'],
             'Quantity': order['Quantity'],
             'Start Date': job_start_time.strftime('%Y-%m-%d %H:%M'),
             'End Date': job_end_time.strftime('%Y-%m-%d %H:%M'),
@@ -454,7 +555,7 @@ def get_highlight_colorscale():
         [1, 'rgb(255,0,0)']            # Red for highlighted
     ]
 
-def show_gantt_chart(schedule_df):
+def show_gantt_chart(schedule_df, selected_order=None):
     """Create a Gantt chart visualization showing work order flow through work centers"""
     st.subheader(get_text('gantt_title'))
     
@@ -466,10 +567,20 @@ def show_gantt_chart(schedule_df):
     schedule_df['Start Date'] = pd.to_datetime(schedule_df['Start Date'])
     schedule_df['End Date'] = pd.to_datetime(schedule_df['End Date'])
     
-    # Create color map for unique job numbers
-    job_numbers = schedule_df['Job Number'].unique()
-    colors = px.colors.qualitative.Set3 * (1 + len(job_numbers) // len(px.colors.qualitative.Set3))
-    color_map = dict(zip(job_numbers, colors[:len(job_numbers)]))
+    # Get list of jobs and add order selection in the sidebar
+    job_numbers = sorted(schedule_df['Job Number'].unique())
+    st.session_state.gantt_selected_order = st.sidebar.selectbox(
+        get_text('select_order'),
+        ['None'] + list(job_numbers),
+        key='gantt_order_select'
+    )
+    selected_order = st.session_state.gantt_selected_order
+
+    # Create color mapping based on selection
+    def get_color(job_number):
+        if selected_order == 'None' or selected_order is None:
+            return px.colors.qualitative.Set3[hash(job_number) % len(px.colors.qualitative.Set3)]
+        return '#0000FF' if job_number == selected_order else '#D3D3D3'
     
     fig = go.Figure()
     
@@ -485,7 +596,7 @@ def show_gantt_chart(schedule_df):
                 y=[f"{step['WorkCenter']} - {step['Place']}"],
                 orientation='h',
                 name=job_number,
-                marker_color=color_map[job_number],
+                marker_color=get_color(job_number),
                 showlegend=bool(idx == job_steps.index[0]),  # Show in legend only once per job
                 customdata=np.array([[
                     job_number,
@@ -495,11 +606,13 @@ def show_gantt_chart(schedule_df):
                     step['Run Time'],
                     step['Total Hours'],
                     step['Start Date'].strftime('%Y-%m-%d %H:%M'),
-                    step['End Date'].strftime('%Y-%m-%d %H:%M')
+                    step['End Date'].strftime('%Y-%m-%d %H:%M'),
+                    step['Operation']
                 ]]),
                 hovertemplate=
                 "<b>Job: %{customdata[0]}</b><br>" +
                 "Part: %{customdata[1]}<br>" +
+                "Operation: %{customdata[8]}<br>" +
                 "Work Center: %{y}<br>" +
                 "Machine: %{customdata[2]}<br>" +
                 "Setup Time: %{customdata[3]:.1f}h<br>" +
@@ -518,7 +631,7 @@ def show_gantt_chart(schedule_df):
                     y=[f"{step['WorkCenter']} - {step['Place']}",
                        f"{next_step['WorkCenter']} - {next_step['Place']}"],
                     mode='lines',
-                    line=dict(color=color_map[job_number], dash='dot'),
+                    line=dict(color=get_color(job_number), dash='dot'),
                     showlegend=False,
                     hoverinfo='skip'
                 ))
@@ -557,7 +670,8 @@ def show_order_timeline(schedule_df):
     orders = sorted(schedule_df['Job Number'].unique())
     selected_order = st.selectbox(
         get_text('select_order'),
-        ['None'] + list(orders)
+        ['None'] + list(orders),
+        key='timeline_order_select'
     )
     
     if selected_order != 'None':
@@ -726,6 +840,15 @@ def main():
 
     st.title(get_text('title'))
     
+    # Add output folder selection in sidebar at the top
+    st.sidebar.markdown("---")
+    output_folder = st.sidebar.text_input(
+        get_text('output_folder'),
+        value=st.session_state.output_folder,
+        placeholder=get_text('output_folder_placeholder')
+    )
+    st.session_state.output_folder = output_folder
+    
     # Get optimization weights
     weights = get_optimization_weights()
     
@@ -762,6 +885,22 @@ def main():
                     with st.spinner("..."):
                         st.session_state.schedule_df = create_schedule(orders_df, resources_df, weights)
                         st.session_state.resources_df = resources_df
+                        
+                        # Auto-save to Excel if output folder is specified
+                        if st.session_state.output_folder:
+                            try:
+                                filepath = export_schedule_to_excel(st.session_state.schedule_df, st.session_state.output_folder)
+                                st.success(get_text('auto_save_success').format(filepath))
+                            except Exception as e:
+                                st.error(get_text('auto_save_error').format(str(e)))
+                        
+                        # Auto-save to Excel if output folder is specified
+                        if st.session_state.output_folder:
+                            try:
+                                filepath = export_schedule_to_excel(st.session_state.schedule_df, st.session_state.output_folder)
+                                st.success(get_text('auto_save_success').format(filepath))
+                            except Exception as e:
+                                st.error(get_text('auto_save_error').format(str(e)))
             else:
                 if st.button(get_text('generate_schedule')):
                     with st.spinner("..."):
@@ -830,7 +969,7 @@ def main():
                             if not late_orders.empty:
                                 st.warning(f"{get_text('num_late_orders')}: {len(late_orders)}")
                                 st.dataframe(late_orders[['Job Number', 'Part Number', 'End Date',
-                                                        'Due Date', 'Total Hours']])
+                                                         'Due Date', 'Total Hours']])
                             else:
                                 st.success(get_text('no_late_orders'))
                         
@@ -854,8 +993,8 @@ def main():
                                 
                                 # Check for significant differences
                                 for idx in comparison.index:
-                                    orig_total = comparison.loc[idx, 'Total Hours (Original)']
-                                    sched_total = comparison.loc[idx, 'Total Hours (Scheduled)']
+                                    orig_total = comparison.loc[idx, 'TotalHours (Original)']
+                                    sched_total = comparison.loc[idx, 'TotalHours (Scheduled)']
                                     if abs(orig_total - sched_total) > 0.01:
                                         st.warning(get_text('hours_mismatch').format(
                                             idx[0], idx[1], orig_total, sched_total
