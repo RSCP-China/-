@@ -183,72 +183,150 @@ def load_resources(file):
         st.error(f"Error loading resources file: {str(e)}")
         return None
 
-def schedule_operations(orders_df, resources_df):
-    """Schedule operations with finite capacity and priority-based forwarding"""
+def create_batches(orders_df, max_batch_hours):
+    """Create batches of operations optimizing for setup time"""
+    batches = []
+    
+    # Group operations by Part Number and WorkCenter
+    grouped_ops = orders_df.groupby(['Part Number', 'WorkCenter'])
+    
+    for (part_number, work_center), group in grouped_ops:
+        # Sort operations by priority and due date
+        group = group.sort_values(['JobPriority', 'Due Date'])
+        
+        current_batch = []
+        batch_run_time = 0
+        batch_setup_time = 0
+        
+        for _, operation in group.iterrows():
+            # For new batch, consider full setup time
+            if not current_batch:
+                batch_setup_time = operation['Setup Time']
+                batch_run_time = operation['Run Time']
+                current_batch.append(operation)
+            else:
+                # For existing batch, only add run time (setup already counted)
+                if batch_run_time + operation['Run Time'] <= max_batch_hours:
+                    batch_run_time += operation['Run Time']
+                    batch_setup_time = max(batch_setup_time, operation['Setup Time'])
+                    current_batch.append(operation)
+                else:
+                    # Finalize current batch
+                    batches.append({
+                        'operations': current_batch,
+                        'work_center': work_center,
+                        'part_number': part_number,
+                        'total_hours': batch_run_time + batch_setup_time,
+                        'setup_time': batch_setup_time,
+                        'priority': min(op['JobPriority'] for op in current_batch)
+                    })
+                    # Start new batch with current operation
+                    current_batch = [operation]
+                    batch_run_time = operation['Run Time']
+                    batch_setup_time = operation['Setup Time']
+        
+        # Add final batch
+        if current_batch:
+            batches.append({
+                'operations': current_batch,
+                'work_center': work_center,
+                'part_number': part_number,
+                'total_hours': batch_run_time + batch_setup_time,
+                'setup_time': batch_setup_time,
+                'priority': min(op['JobPriority'] for op in current_batch)
+            })
+    
+    # Sort batches by priority and due date
+    batches.sort(key=lambda x: (x['priority'], min(op['Due Date'] for op in x['operations'])))
+    return batches
+
+def schedule_operations(orders_df, resources_df, settings):
+    """Schedule operations with optimized batching and priority-based forwarding"""
     today = pd.Timestamp.now().normalize()
     
     # Initialize machine availability tracking
     machine_schedules = {}
     for _, resource in resources_df.iterrows():
         work_center = resource['WorkCenter']
-        num_machines = int(resource['Available Quantity'])  # Ensure integer
+        num_machines = int(resource['Available Quantity'])
         if num_machines > 0:
             machine_schedules[work_center] = [{
                 'available_from': today,
                 'machine_id': i + 1,
-                'total_hours': 0  # Track total assigned hours for load balancing
+                'total_hours': 0
             } for i in range(num_machines)]
+
+    # Create optimized batches
+    batches = create_batches(orders_df, settings['max_batch_hours'])
     
-    # Sort by priority and due date to ensure high priority jobs are scheduled first
-    orders_df = orders_df.sort_values(['JobPriority', 'Due Date'])
+    # Track completion times for each job's operations
+    job_completion_times = {}
     scheduled_orders = []
-    
-    # Group operations by job to maintain operation sequences
-    for job_number, job_ops in orders_df.groupby('Job Number'):
-        # Sort operations by sequence
-        job_ops = job_ops.sort_values('operation sequence')
-        prev_op_end = today  # Start from today for the first operation
+
+    # Process each batch while respecting job dependencies
+    for batch in batches:
+        work_center = batch['work_center']
+        machines = machine_schedules[work_center]
         
-        # Process each operation in sequence
-        for _, operation in job_ops.iterrows():
-            work_center = operation['WorkCenter']
-            if work_center not in machine_schedules:
-                print(f"Warning: Work center {work_center} not found in resources")
-                continue
+        # Find earliest available machine considering job dependencies
+        earliest_start = None
+        selected_machine = None
+        
+        for machine in machines:
+            possible_start = machine['available_from']
             
-            total_hours = operation['Run Time'] + operation['Setup Time']
-            machines = machine_schedules[work_center]
+            # Check dependencies for all operations in batch
+            for operation in batch['operations']:
+                job_number = operation['Job Number']
+                op_seq = operation['operation sequence']
+                
+                # If job has previous operations, consider their completion times
+                if job_number in job_completion_times:
+                    prev_op_time = job_completion_times[job_number].get(op_seq - 1)
+                    if prev_op_time:
+                        possible_start = max(possible_start, prev_op_time)
             
-            # Find the machine that can start this operation the earliest
-            earliest_start = None
-            selected_machine = None
+            if earliest_start is None or possible_start < earliest_start:
+                earliest_start = possible_start
+                selected_machine = machine
+        
+        if selected_machine is None:
+            print(f"Warning: No machine available for {work_center}")
+            continue
+        
+        # Schedule all operations in the batch
+        current_time = earliest_start
+        
+        # Apply setup time once for the batch
+        setup_end = current_time + pd.Timedelta(hours=batch['setup_time'])
+        current_time = setup_end
+        
+        # Schedule each operation in the batch
+        for operation in batch['operations']:
+            # Only use run time since setup is already accounted for
+            run_time = operation['Run Time']
+            end_time = current_time + pd.Timedelta(hours=run_time)
             
-            for machine in machines:
-                possible_start = max(machine['available_from'], prev_op_end)
-                if earliest_start is None or possible_start < earliest_start:
-                    earliest_start = possible_start
-                    selected_machine = machine
-            
-            if selected_machine is None:
-                print(f"Warning: No machine available for {work_center}")
-                continue
-            
-            # Schedule the operation
-            end_time = earliest_start + pd.Timedelta(hours=total_hours)
-            
-            # Record the scheduled operation
+            # Record scheduled operation
             scheduled_op = operation.copy()
-            scheduled_op['Start Time'] = earliest_start.strftime('%Y-%m-%d %H:%M')
+            scheduled_op['Start Time'] = current_time.strftime('%Y-%m-%d %H:%M')
             scheduled_op['Finish Time'] = end_time.strftime('%Y-%m-%d %H:%M')
             scheduled_op['Machine'] = f"{work_center}_M{selected_machine['machine_id']}"
-            
-            # Update machine availability and load tracking
-            selected_machine['available_from'] = end_time
-            selected_machine['total_hours'] += total_hours
+            scheduled_orders.append(scheduled_op)
             
             # Update job completion tracking
-            prev_op_end = end_time
-            scheduled_orders.append(scheduled_op)
+            job_number = operation['Job Number']
+            op_seq = operation['operation sequence']
+            if job_number not in job_completion_times:
+                job_completion_times[job_number] = {}
+            job_completion_times[job_number][op_seq] = end_time
+            
+            # Move to next operation time
+            current_time = end_time
+        
+        # Update machine availability
+        selected_machine['available_from'] = current_time
+        selected_machine['total_hours'] += batch['total_hours']
     
     result_df = pd.DataFrame(scheduled_orders)
     
@@ -265,6 +343,21 @@ def schedule_operations(orders_df, resources_df):
         print(f"\nSchedule Metrics:")
         print(f"Makespan: {makespan:.1f} hours")
         print(f"Schedule spans from {earliest_start.strftime('%Y-%m-%d')} to {latest_end.strftime('%Y-%m-%d')}")
+        
+        # Calculate and print batching metrics
+        total_batches = len(batches)
+        avg_batch_size = sum(len(batch['operations']) for batch in batches) / total_batches
+        total_setup_time = sum(batch['setup_time'] for batch in batches)
+        setup_time_saved = sum(
+            sum(op['Setup Time'] for op in batch['operations']) - batch['setup_time']
+            for batch in batches
+        )
+        
+        print(f"\nBatching Metrics:")
+        print(f"Total batches: {total_batches}")
+        print(f"Average batch size: {avg_batch_size:.1f} operations")
+        print(f"Total setup time: {total_setup_time:.1f} hours")
+        print(f"Setup time saved: {setup_time_saved:.1f} hours")
         
         # Convert back to string format for display
         result_df['Start Time'] = result_df['Start Time'].dt.strftime('%Y-%m-%d %H:%M')
@@ -506,8 +599,8 @@ def main():
                     warning_output = io.StringIO()
                     sys.stdout = warning_output
                     
-                    # Apply scheduling with finite capacity
-                    scheduled_orders = schedule_operations(orders_df, resources_df)
+                    # Apply scheduling with finite capacity and batching configuration
+                    scheduled_orders = schedule_operations(orders_df, resources_df, settings)
                     
                     # Restore stdout and get warnings
                     sys.stdout = sys.__stdout__
@@ -565,8 +658,10 @@ def main():
                 
                 # Display schedule results first
                 st.subheader("Schedule Results")
-                display_cols = ['Job Number', 'Part Number', 'WorkCenter', 'Machine',
-                              'Start Time', 'Finish Time', 'Run Time', 'Setup Time']
+                display_cols = ['Job Number', 'Part Number', 'Due Date',
+                              'JobPriority', 'operation sequence', 'Quantity', 'WorkCenter',
+                              'Run Time', 'Setup Time', 'Place', 'Customer', 'Machine',
+                              'Start Time', 'Finish Time']
                 st.dataframe(scheduled_orders[display_cols].sort_values(['Start Time']), use_container_width=True)
 
                 # Create tabs for visualizations
